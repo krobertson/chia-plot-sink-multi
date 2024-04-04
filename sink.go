@@ -125,6 +125,10 @@ func (s *sink) handleConnection(conn net.Conn) {
 	s.sortPaths()
 }
 
+// handleTransfer takes care of receiving the plot from the remote host and
+// storing on the temporary NVME/SSDs. It returns the filename of the plot, the
+// path to the temp storage location, and a bool indicating success. At the end,
+// it closes the remote connection regardless of success.
 func (s *sink) handleTransfer(conn net.Conn, plot *plotPath) (string, string, bool) {
 	defer conn.Close()
 
@@ -175,7 +179,7 @@ func (s *sink) handleTransfer(conn net.Conn, plot *plotPath) (string, string, bo
 	defer f.Close()
 
 	// perform the copy
-	log.Printf("Receiving plot at %s", tmpfile)
+	log.Printf("Receiving plot %s from %s", filename, conn.RemoteAddr().String())
 	start := time.Now()
 	bytes, err := io.Copy(f, conn)
 	if err != nil {
@@ -187,12 +191,16 @@ func (s *sink) handleTransfer(conn net.Conn, plot *plotPath) (string, string, bo
 
 	// log successful and some metrics
 	seconds := time.Since(start).Seconds()
-	log.Printf("Successfully stored %s (%s, %f secs, %s/sec)",
-		tmpfile, humanize.IBytes(uint64(bytes)), seconds, humanize.Bytes(uint64(float64(bytes)/seconds)))
+	log.Printf("Successfully stored %s:%s (%s, %f secs, %s/sec)",
+		conn.RemoteAddr().String(), filename, humanize.IBytes(uint64(bytes)), seconds, humanize.Bytes(uint64(float64(bytes)/seconds)))
 
 	return filename, tmpfile, true
 }
 
+// handleMove is responsible for moving the plot from the temp location to the
+// final hard disk. It returns a bool to indicate success. On success, it will
+// remove the temp location. On failure, the file should be moved to a reprocess
+// queue to try another disk.
 func (s *sink) handleMove(plot *plotPath, filename, tmpfile string) bool {
 	tf, err := os.Open(tmpfile)
 	if err != nil {
