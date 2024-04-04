@@ -22,6 +22,7 @@ type sink struct {
 	sortMutex   sync.Mutex
 	transfers   atomic.Int64
 	listener    net.Listener
+	wg          sync.WaitGroup
 }
 
 // newSink will create a the sink server process and validate all of
@@ -84,6 +85,9 @@ func newSink(paths []string) (*sink, error) {
 // the sink. It encapculates a single request and is ran within its own
 // goroutine.
 func (s *sink) handleConnection(conn net.Conn) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+
 	// pick a plot. This should return the one with the most free space that
 	// isn't busy. we want to lock early
 	plot := s.pickPlot()
