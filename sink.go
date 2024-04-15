@@ -10,65 +10,43 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/dustin/go-humanize"
 )
 
 type sink struct {
-	plots       map[string]*plotPath
-	sortedPlots []*plotPath
-	sortMutex   sync.Mutex
-	transfers   atomic.Int64
-	listener    net.Listener
-	wg          sync.WaitGroup
+	sortedGroups []*plotGroup
+	sortMutex    sync.Mutex
+	cacheGroup   *plotGroup
+	listener     net.Listener
+	wg           sync.WaitGroup
 }
 
 // newSink will create a the sink server process and validate all of
 // the provided plot paths. It will return an error if any of the paths do not
 // exist, or are not a directory.
-func newSink(paths []string) (*sink, error) {
+func newSink(cfg *config) (*sink, error) {
 	s := &sink{
-		plots:       make(map[string]*plotPath),
-		sortedPlots: make([]*plotPath, 0),
+		sortedGroups: make([]*plotGroup, 0),
 	}
 
-	// validate the plots exist and add them in
-	for _, p := range paths {
-		p, err := filepath.Abs(p)
+	// populate cache settings
+	cacheGroup, err := newPlotGroup(cfg.Cache)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize cache group: %v", err)
+	}
+	s.cacheGroup = cacheGroup
+	s.cacheGroup.sortCachePaths()
+
+	// populage destination groups
+	for _, dst := range cfg.Destinations {
+		pg, err := newPlotGroup(dst)
 		if err != nil {
-			log.Printf("Path %s failed expansion, skipping: %v", p, err)
-			continue
+			return nil, fmt.Errorf("failed to initialize destination group: %v", err)
 		}
-
-		fi, err := os.Stat(p)
-		if err != nil {
-			log.Printf("Path %s failed validation, skipping: %v", p, err)
-			continue
-		}
-
-		if !fi.IsDir() {
-			log.Printf("Path %s is not a directory, skipping", p)
-			continue
-		}
-
-		pp := &plotPath{path: p}
-		pp.updateFreeSpace()
-		s.plots[p] = pp
-		s.sortedPlots = append(s.sortedPlots, pp)
-
-		log.Printf("Registred plot path: %s [%s free / %s total]",
-			p, humanize.IBytes(pp.freeSpace), humanize.IBytes(pp.totalSpace))
+		s.sortedGroups = append(s.sortedGroups, pg)
 	}
-
-	// ensure we have at least one
-	if len(s.sortedPlots) == 0 {
-		return nil, fmt.Errorf("at least one valid plot path must be specified")
-	}
-
-	// sort the paths
-	s.sortPaths()
 
 	// bind to the port
 	l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
@@ -88,31 +66,51 @@ func (s *sink) handleConnection(conn net.Conn) {
 	s.wg.Add(1)
 	defer s.wg.Done()
 
+	// receive the file size bytes
+	sizeBytes := make([]byte, 8)
+	_, err := conn.Read(sizeBytes)
+	if err != nil {
+		log.Printf("Failed to receive file size: %v", err)
+		conn.Close()
+		return
+	}
+	size := convertBytesToUInt64(sizeBytes)
+
 	// pick a plot. This should return the one with the most free space that
 	// isn't busy. we want to lock early
-	plot := s.pickPlot()
+	pg, plot := s.pickPlot(size)
 	if plot == nil {
 		conn.Close()
+		log.Printf("Request to store plot, but no eligible plot found (%s / %s)", humanize.Bytes(size), humanize.Bytes(plot.freeSpace))
 		return
 	}
 
-	// check if we're maxed on concurrent transfers
-	if s.transfers.Load() >= int64(concurrency) {
-		log.Print("Request to store plot, but at max transfers")
-		conn.Close()
-		return
-	}
-
-	// lock the path
+	// lock and handle stuff, there is a lot
 	plot.mutex.Lock()
 	defer plot.mutex.Unlock()
 	plot.busy.Store(true)
 	defer plot.busy.Store(false)
-	s.transfers.Add(1)
-	defer s.transfers.Add(-1)
+	s.cacheGroup.transfers.Add(1)
+	defer s.cacheGroup.transfers.Add(-1)
+	pg.transfers.Add(1)
+	defer s.sortGroups()
+	defer pg.transfers.Add(-1)
+	s.sortGroups()
+
+	// pick the cache plot
+	cachePlot := s.cacheGroup.pickPlot(size)
+	if cachePlot == nil {
+		conn.Close()
+		log.Print("Failed to get a cache plot to use")
+		return
+	}
+	cachePlot.transfers.Add(1)
+	defer s.cacheGroup.sortCachePaths()
+	defer cachePlot.transfers.Add(-1)
+	s.cacheGroup.sortCachePaths()
 
 	// transfer the file to fast local storage
-	filename, tmpfile, ok := s.handleTransfer(conn, plot)
+	filename, tmpfile, ok := s.handleTransfer(conn, cachePlot, plot)
 	if !ok {
 		// conn already closed
 		return
@@ -126,37 +124,23 @@ func (s *sink) handleConnection(conn net.Conn) {
 
 	// update free space
 	plot.updateFreeSpace()
-	s.sortPaths()
+	cachePlot.updateFreeSpace()
+	pg.sortPaths()
 }
 
 // handleTransfer takes care of receiving the plot from the remote host and
 // storing on the temporary NVME/SSDs. It returns the filename of the plot, the
 // path to the temp storage location, and a bool indicating success. At the end,
 // it closes the remote connection regardless of success.
-func (s *sink) handleTransfer(conn net.Conn, plot *plotPath) (string, string, bool) {
+func (s *sink) handleTransfer(conn net.Conn, cachePlot, plot *plotPath) (string, string, bool) {
 	defer conn.Close()
 
-	// receive the file size bytes
-	sizeBytes := make([]byte, 8)
-	_, err := conn.Read(sizeBytes)
-	if err != nil {
-		log.Printf("Failed to receive file size: %v", err)
-		return "", "", false
-	}
-	size := convertBytesToUInt64(sizeBytes)
-
-	// check if we have enough free space
-	if plot.freeSpace <= size {
-		log.Printf("Request to store plot, but not enough space (%s / %s)", humanize.Bytes(size), humanize.Bytes(plot.freeSpace))
-		return "", "", false
-	}
-
-	// send response
+	// send response acknowledging to continue
 	conn.Write([]byte{1})
 
 	// receive filename length
 	fnlenBytes := make([]byte, 2)
-	_, err = conn.Read(fnlenBytes)
+	_, err := conn.Read(fnlenBytes)
 	if err != nil {
 		log.Printf("Failed to receive filename length: %v", err)
 		return "", "", false
@@ -173,7 +157,7 @@ func (s *sink) handleTransfer(conn net.Conn, plot *plotPath) (string, string, bo
 	filename := string(filenameBytes)
 
 	// open the file and transfer
-	tmpfile := filepath.Join(tmpdir, filename+".tmp")
+	tmpfile := filepath.Join(cachePlot.path, filename+".tmp")
 	os.Remove(tmpfile)
 	f, err := os.Create(tmpfile)
 	if err != nil {
@@ -190,6 +174,18 @@ func (s *sink) handleTransfer(conn net.Conn, plot *plotPath) (string, string, bo
 		log.Printf("Failure while writing plot %s: %v", tmpfile, err)
 		f.Close()
 		os.Remove(tmpfile)
+		plot.pause()
+		return "", "", false
+	}
+
+	// rename it so we know it was completed
+	dstfile := filepath.Join(cachePlot.path, filename)
+	err = os.Rename(tmpfile, dstfile)
+	if err != nil {
+		log.Printf("Failed to rename temp plot %s: %v", tmpfile, err)
+		f.Close()
+		os.Remove(tmpfile)
+		plot.pause()
 		return "", "", false
 	}
 
@@ -198,7 +194,9 @@ func (s *sink) handleTransfer(conn net.Conn, plot *plotPath) (string, string, bo
 	log.Printf("Successfully stored %s:%s (%s, %f secs, %s/sec)",
 		conn.RemoteAddr().String(), filename, humanize.IBytes(uint64(bytes)), seconds, humanize.Bytes(uint64(float64(bytes)/seconds)))
 
-	return filename, tmpfile, true
+	cachePlot.updateFreeSpace()
+
+	return filename, dstfile, true
 }
 
 // handleMove is responsible for moving the plot from the temp location to the

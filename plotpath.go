@@ -3,8 +3,6 @@
 package main
 
 import (
-	"cmp"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +12,7 @@ import (
 
 type plotPath struct {
 	path       string
+	transfers  atomic.Int64
 	busy       atomic.Bool
 	paused     atomic.Bool
 	freeSpace  uint64
@@ -40,35 +39,4 @@ func (p *plotPath) pause() {
 	time.AfterFunc(5*time.Minute, func() {
 		p.paused.Store(false)
 	})
-}
-
-// sortPaths will update the order of the plotPaths inside the sink's
-// sortedPaths slice. This should be done after every file transfer when the
-// free space is updated.
-func (s *sink) sortPaths() {
-	s.sortMutex.Lock()
-	defer s.sortMutex.Unlock()
-
-	slices.SortStableFunc(s.sortedPlots, func(a, b *plotPath) int {
-		return cmp.Compare(b.freeSpace, a.freeSpace)
-	})
-}
-
-// pickPlot will return which plot path would be most ideal for the current
-// request. It will order the one with the most free space that doesn't already
-// have an active transfer.
-func (s *sink) pickPlot() *plotPath {
-	s.sortMutex.Lock()
-	defer s.sortMutex.Unlock()
-
-	for _, v := range s.sortedPlots {
-		if v.busy.Load() {
-			continue
-		}
-		if v.paused.Load() {
-			continue
-		}
-		return v
-	}
-	return nil
 }

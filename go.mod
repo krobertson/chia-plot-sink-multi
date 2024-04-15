@@ -5,4 +5,5 @@ go 1.21.7
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	golang.org/x/sys v0.18.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
