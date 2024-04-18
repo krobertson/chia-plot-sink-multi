@@ -9,6 +9,7 @@ type config struct {
 }
 
 type configGroup struct {
+	name        string   `yaml:"-"`
 	Concurrency int64    `yaml:"concurrency"`
 	Paths       []string `yaml:"paths"`
 }

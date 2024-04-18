@@ -20,11 +20,12 @@ type plotGroup struct {
 	transfers   atomic.Int64
 
 	sortedPlots []*plotPath
-	sortMutex   sync.Mutex
+	sortMutex   sync.RWMutex
 }
 
 func newPlotGroup(cfg *configGroup) (*plotGroup, error) {
 	pg := &plotGroup{
+		name:        cfg.name,
 		concurrency: cfg.Concurrency,
 		sortedPlots: make([]*plotPath, 0),
 	}
@@ -66,8 +67,15 @@ func newPlotGroup(cfg *configGroup) (*plotGroup, error) {
 		}
 	}
 
+	// ensure concurrency doesn't exceed paths
+	if pg.concurrency > int64(len(pg.sortedPlots)) {
+		pg.concurrency = int64(len(pg.sortedPlots))
+	}
+
 	// sort the paths
 	pg.sortPaths()
+
+	log.Printf("Plot Group %q ready with concurrency %d.", pg.name, pg.concurrency)
 
 	return pg, nil
 }
@@ -100,8 +108,8 @@ func (pg *plotGroup) sortCachePaths() {
 // request. It will order the one with the most free space that doesn't already
 // have an active transfer.
 func (pg *plotGroup) pickPlot(size uint64) *plotPath {
-	pg.sortMutex.Lock()
-	defer pg.sortMutex.Unlock()
+	pg.sortMutex.RLock()
+	defer pg.sortMutex.RUnlock()
 
 	if pg.transfers.Load() >= pg.concurrency {
 		return nil
@@ -140,8 +148,8 @@ func (s *sink) sortGroups() {
 // request. It will loop over the available groups, sorted by the number of
 // transfers they already have, and return an available plotPath to use.
 func (s *sink) pickPlot(size uint64) (*plotGroup, *plotPath) {
-	s.sortMutex.Lock()
-	defer s.sortMutex.Unlock()
+	s.sortMutex.RLock()
+	defer s.sortMutex.RUnlock()
 
 	for _, pg := range s.sortedGroups {
 		pp := pg.pickPlot(size)

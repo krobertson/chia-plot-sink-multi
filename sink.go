@@ -17,7 +17,7 @@ import (
 
 type sink struct {
 	sortedGroups []*plotGroup
-	sortMutex    sync.Mutex
+	sortMutex    sync.RWMutex
 	cacheGroup   *plotGroup
 	listener     net.Listener
 	wg           sync.WaitGroup
@@ -32,6 +32,7 @@ func newSink(cfg *config) (*sink, error) {
 	}
 
 	// populate cache settings
+	cfg.Cache.name = "cache"
 	cacheGroup, err := newPlotGroup(cfg.Cache)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize cache group: %v", err)
@@ -40,7 +41,8 @@ func newSink(cfg *config) (*sink, error) {
 	s.cacheGroup.sortCachePaths()
 
 	// populage destination groups
-	for _, dst := range cfg.Destinations {
+	for n, dst := range cfg.Destinations {
+		dst.name = n
 		pg, err := newPlotGroup(dst)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize destination group: %v", err)
@@ -85,8 +87,19 @@ func (s *sink) handleConnection(conn net.Conn) {
 		return
 	}
 
+	// try and lock. This is mostly to protect against a hypothetical race
+	// condition where a second connection could pick the same plot before it is
+	// locked and marked busy.
+	//
+	// Even if this was hit, it would self resolve once the first transfer was
+	// done, but would cause a slowdown and lower overall throughput.
+	if !plot.mutex.TryLock() {
+		conn.Close()
+		log.Print("Lock race condition hit! Closing and returning.")
+		return
+	}
+
 	// lock and handle stuff, there is a lot
-	plot.mutex.Lock()
 	defer plot.mutex.Unlock()
 	plot.busy.Store(true)
 	defer plot.busy.Store(false)
