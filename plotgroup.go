@@ -23,7 +23,7 @@ type plotGroup struct {
 	sortMutex   sync.RWMutex
 }
 
-func newPlotGroup(cfg *configGroup) (*plotGroup, error) {
+func newPlotGroup(cfg *configGroup, allowExcessConcurrency bool) (*plotGroup, error) {
 	pg := &plotGroup{
 		name:        cfg.name,
 		concurrency: cfg.Concurrency,
@@ -68,7 +68,7 @@ func newPlotGroup(cfg *configGroup) (*plotGroup, error) {
 	}
 
 	// ensure concurrency doesn't exceed paths
-	if pg.concurrency > int64(len(pg.sortedPlots)) {
+	if !allowExcessConcurrency && pg.concurrency > int64(len(pg.sortedPlots)) {
 		pg.concurrency = int64(len(pg.sortedPlots))
 	}
 

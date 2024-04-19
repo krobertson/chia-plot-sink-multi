@@ -35,7 +35,7 @@ func newSink(cfg *config) (*sink, error) {
 
 	// populate cache settings
 	cfg.Cache.name = "cache"
-	cacheGroup, err := newPlotGroup(cfg.Cache)
+	cacheGroup, err := newPlotGroup(cfg.Cache, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize cache group: %v", err)
 	}
@@ -45,7 +45,7 @@ func newSink(cfg *config) (*sink, error) {
 	// populage destination groups
 	for n, dst := range cfg.Destinations {
 		dst.name = n
-		pg, err := newPlotGroup(dst)
+		pg, err := newPlotGroup(dst, false)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize destination group: %v", err)
 		}
