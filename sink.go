@@ -183,7 +183,7 @@ func (s *sink) handleTransfer(conn net.Conn, cachePlot, plot *plotPath) (string,
 	defer f.Close()
 
 	// open directio writter
-	dio, err := directio.New(f)
+	dio, err := directio.NewSize(f, 1048576) // 1MB buffer
 	if err != nil {
 		log.Printf("Failed to create directio writter: %v", err)
 		return "", "", false
@@ -247,7 +247,7 @@ func (s *sink) handleMove(plot *plotPath, filename, tmpfile string) bool {
 	}
 
 	// open directio writter
-	dio, err := directio.New(f)
+	dio, err := directio.NewSize(f, 1048576) // 1MB buffer
 	if err != nil {
 		log.Printf("Failed to create directio writter: %v", err)
 		return false
