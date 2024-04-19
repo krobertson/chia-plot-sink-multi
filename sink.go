@@ -10,8 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/brk0v/directio"
 	"github.com/dustin/go-humanize"
 )
 
@@ -172,19 +174,29 @@ func (s *sink) handleTransfer(conn net.Conn, cachePlot, plot *plotPath) (string,
 	// open the file and transfer
 	tmpfile := filepath.Join(cachePlot.path, filename+".tmp")
 	os.Remove(tmpfile)
-	f, err := os.Create(tmpfile)
+	flags := os.O_WRONLY | os.O_EXCL | os.O_CREATE | syscall.O_DIRECT
+	f, err := os.OpenFile(tmpfile, flags, 0644)
 	if err != nil {
 		log.Printf("Failed to open file at %s: %v", tmpfile, err)
 		return "", "", false
 	}
 	defer f.Close()
 
+	// open directio writter
+	dio, err := directio.New(f)
+	if err != nil {
+		log.Printf("Failed to create directio writter: %v", err)
+		return "", "", false
+	}
+	defer dio.Flush()
+
 	// perform the copy
 	log.Printf("Receiving plot %s from %s", filename, conn.RemoteAddr().String())
 	start := time.Now()
-	bytes, err := io.Copy(f, conn)
+	bytes, err := io.Copy(dio, conn)
 	if err != nil {
 		log.Printf("Failure while writing plot %s: %v", tmpfile, err)
+		dio.Flush()
 		f.Close()
 		os.Remove(tmpfile)
 		plot.pause()
@@ -227,24 +239,37 @@ func (s *sink) handleMove(plot *plotPath, filename, tmpfile string) bool {
 	dstfile := filepath.Join(plot.path, filename)
 	tmpdstfile := dstfile + ".tmp"
 
-	f, err := os.Create(tmpdstfile)
+	flags := os.O_WRONLY | os.O_EXCL | os.O_CREATE | syscall.O_DIRECT
+	f, err := os.OpenFile(tmpdstfile, flags, 0644)
 	if err != nil {
 		log.Printf("Failed to open dest file: %v", err)
 		return false
 	}
-	defer f.Close()
+
+	// open directio writter
+	dio, err := directio.New(f)
+	if err != nil {
+		log.Printf("Failed to create directio writter: %v", err)
+		return false
+	}
 
 	// TODO: handle errors/failures at this point?
 
 	// perform the copy
 	start := time.Now()
-	bytes, err := io.Copy(f, tf)
+	bytes, err := io.Copy(dio, tf)
 	if err != nil {
 		log.Printf("Failure while moving plot %s: %v", tmpfile, err)
+		dio.Flush()
+		f.Close()
 		os.Remove(tmpdstfile)
 		plot.pause()
 		return false
 	}
+
+	// flush and close before rename
+	dio.Flush()
+	f.Close()
 
 	// rename it so it can be used by the chia harvester
 	err = os.Rename(tmpdstfile, dstfile)
