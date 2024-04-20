@@ -174,29 +174,19 @@ func (s *sink) handleTransfer(conn net.Conn, cachePlot, plot *plotPath) (string,
 	// open the file and transfer
 	tmpfile := filepath.Join(cachePlot.path, filename+".tmp")
 	os.Remove(tmpfile)
-	flags := os.O_WRONLY | os.O_EXCL | os.O_CREATE | syscall.O_DIRECT
-	f, err := os.OpenFile(tmpfile, flags, 0644)
+	f, err := os.Create(tmpfile)
 	if err != nil {
 		log.Printf("Failed to open file at %s: %v", tmpfile, err)
 		return "", "", false
 	}
 	defer f.Close()
 
-	// open directio writter
-	dio, err := directio.NewSize(f, 1048576) // 1MB buffer
-	if err != nil {
-		log.Printf("Failed to create directio writter: %v", err)
-		return "", "", false
-	}
-	defer dio.Flush()
-
 	// perform the copy
 	log.Printf("Receiving plot %s from %s", filename, conn.RemoteAddr().String())
 	start := time.Now()
-	bytes, err := io.Copy(dio, conn)
+	bytes, err := io.Copy(f, conn)
 	if err != nil {
 		log.Printf("Failure while writing plot %s: %v", tmpfile, err)
-		dio.Flush()
 		f.Close()
 		os.Remove(tmpfile)
 		plot.pause()
